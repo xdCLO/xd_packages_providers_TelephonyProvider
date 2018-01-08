@@ -19,6 +19,7 @@ import android.content.Context;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.provider.Telephony;
+import android.support.test.InstrumentationRegistry;
 import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 import android.util.Log;
@@ -35,6 +36,16 @@ public class TelephonyProviderTestable extends TelephonyProvider {
     private static final String TAG = "TelephonyProviderTestable";
 
     private InMemoryTelephonyProviderDbHelper mDbHelper;
+    private MockInjector mMockInjector;
+
+    public TelephonyProviderTestable() {
+        this(new MockInjector());
+    }
+
+    private TelephonyProviderTestable(MockInjector mockInjector) {
+        super(mockInjector);
+        mMockInjector = mockInjector;
+    }
 
     @Override
     public boolean onCreate() {
@@ -71,6 +82,10 @@ public class TelephonyProviderTestable extends TelephonyProvider {
         return false;
     }
 
+    public void fakeCallingUid(int uid) {
+        mMockInjector.fakeCallingUid(uid);
+    }
+
     /**
      * An in memory DB for TelephonyProviderTestable to use
      */
@@ -78,7 +93,7 @@ public class TelephonyProviderTestable extends TelephonyProvider {
 
 
         public InMemoryTelephonyProviderDbHelper() {
-            super(null,      // no context is needed for in-memory db
+            super(InstrumentationRegistry.getTargetContext(),
                     null,    // db file name is null for in-memory db
                     null,    // CursorFactory is null by default
                     1);      // db version is no-op for tests
@@ -100,6 +115,19 @@ public class TelephonyProviderTestable extends TelephonyProvider {
         public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
             Log.d(TAG, "InMemoryTelephonyProviderDbHelper onUpgrade doing nothing");
             return;
+        }
+    }
+
+    static class MockInjector extends Injector {
+        private int callingUid = 0;
+
+        @Override
+        int binderGetCallingUid() {
+            return callingUid;
+        }
+
+        void fakeCallingUid(int uid) {
+            callingUid = uid;
         }
     }
 }
