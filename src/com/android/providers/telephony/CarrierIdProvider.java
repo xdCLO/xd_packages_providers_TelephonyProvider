@@ -22,7 +22,9 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.UriMatcher;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
@@ -70,12 +72,13 @@ public class CarrierIdProvider extends ContentProvider {
     private static final int DATABASE_VERSION = 3;
 
     private static final String ASSETS_PB_FILE = "carrier_list.pb";
-    private static final String VERSION_PREF_KEY = "version";
+    private static final String VERSION_KEY = "version";
     private static final String OTA_UPDATED_PB_PATH = "misc/carrierid/" + ASSETS_PB_FILE;
     private static final String PREF_FILE = CarrierIdProvider.class.getSimpleName();
 
     private static final UriMatcher s_urlMatcher = new UriMatcher(UriMatcher.NO_MATCH);
     private static final int URL_UPDATE_FROM_PB = 1;
+    private static final int URL_GET_VERSION    = 2;
 
     /**
      * index 0: {@link CarrierIdentification#MCCMNC}
@@ -162,7 +165,8 @@ public class CarrierIdProvider extends ContentProvider {
         mDbHelper = new CarrierIdDatabaseHelper(getContext());
         mDbHelper.getReadableDatabase();
         s_urlMatcher.addURI(AUTHORITY, "update_db", URL_UPDATE_FROM_PB);
-        initDatabaseFromPb(mDbHelper.getWritableDatabase());
+        s_urlMatcher.addURI(AUTHORITY, "get_version", URL_GET_VERSION);
+        updateDatabaseFromPb(mDbHelper.getWritableDatabase());
         return true;
     }
 
@@ -175,6 +179,7 @@ public class CarrierIdProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projectionIn, String selection,
                         String[] selectionArgs, String sortOrder) {
+        checkReadPermission();
         if (VDBG) {
             Log.d(TAG, "query:"
                     + " uri=" + uri
@@ -182,15 +187,25 @@ public class CarrierIdProvider extends ContentProvider {
                     + " selection=" + selection
                     + " selectionArgs=" + Arrays.toString(selectionArgs));
         }
-        SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
-        qb.setTables(CARRIER_ID_TABLE);
 
-        SQLiteDatabase db = getReadableDatabase();
-        return qb.query(db, projectionIn, selection, selectionArgs, null, null, sortOrder);
+        final int match = s_urlMatcher.match(uri);
+        switch (match) {
+            case URL_GET_VERSION:
+                final MatrixCursor cursor = new MatrixCursor(new String[] {VERSION_KEY});
+                cursor.addRow(new Object[] {getAppliedVersion()});
+                return cursor;
+            default:
+                SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
+                qb.setTables(CARRIER_ID_TABLE);
+
+                SQLiteDatabase db = getReadableDatabase();
+                return qb.query(db, projectionIn, selection, selectionArgs, null, null, sortOrder);
+        }
     }
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
+        checkWritePermission();
         final long row = getWritableDatabase().insertOrThrow(CARRIER_ID_TABLE, null, values);
         if (row > 0) {
             final Uri newUri = ContentUris.withAppendedId(CarrierIdentification.CONTENT_URI, row);
@@ -202,6 +217,7 @@ public class CarrierIdProvider extends ContentProvider {
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
+        checkWritePermission();
         if (VDBG) {
             Log.d(TAG, "delete:"
                     + " uri=" + uri
@@ -219,6 +235,7 @@ public class CarrierIdProvider extends ContentProvider {
 
     @Override
     public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        checkWritePermission();
         if (VDBG) {
             Log.d(TAG, "update:"
                     + " uri=" + uri
@@ -230,7 +247,7 @@ public class CarrierIdProvider extends ContentProvider {
         final int match = s_urlMatcher.match(uri);
         switch (match) {
             case URL_UPDATE_FROM_PB:
-                return initDatabaseFromPb(getWritableDatabase());
+                return updateDatabaseFromPb(getWritableDatabase());
             default:
                 final int count = getWritableDatabase().update(CARRIER_ID_TABLE, values, selection,
                         selectionArgs);
@@ -296,30 +313,50 @@ public class CarrierIdProvider extends ContentProvider {
      * Use version number to detect file update.
      * Update database with data from assets or ota only if version jumps.
      */
-    private int initDatabaseFromPb(SQLiteDatabase db) {
-        Log.d(TAG, "init database from pb file");
+    private int updateDatabaseFromPb(SQLiteDatabase db) {
+        Log.d(TAG, "update database from pb file");
         int rows = 0;
         CarrierIdProto.CarrierList carrierList = getUpdateCarrierList();
+        // No update is needed
         if (carrierList == null) return rows;
-        setAppliedVersion(carrierList.version);
-        List<ContentValues> cvs = new ArrayList<>();
-        for (CarrierIdProto.CarrierId id : carrierList.carrierId) {
-            for (CarrierIdProto.CarrierAttribute attr : id.carrierAttribute) {
-                ContentValues cv = new ContentValues();
-                cv.put(CarrierIdentification.CID, id.canonicalId);
-                cv.put(CarrierIdentification.NAME, id.carrierName);
-                convertCarrierAttrToContentValues(cv, cvs, attr, 0);
+
+        ContentValues cv;
+        List<ContentValues> cvs;
+        try {
+            // Batch all insertions in a single transaction to improve efficiency.
+            db.beginTransaction();
+            db.delete(CARRIER_ID_TABLE, null, null);
+            for (CarrierIdProto.CarrierId id : carrierList.carrierId) {
+                for (CarrierIdProto.CarrierAttribute attr : id.carrierAttribute) {
+                    cv = new ContentValues();
+                    cv.put(CarrierIdentification.CID, id.canonicalId);
+                    cv.put(CarrierIdentification.NAME, id.carrierName);
+                    cvs = new ArrayList<>();
+                    convertCarrierAttrToContentValues(cv, cvs, attr, 0);
+                    for (ContentValues contentVal : cvs) {
+                        // When a constraint violation occurs, the row that contains the violation
+                        // is not inserted. But the command continues executing normally.
+                        if (db.insertWithOnConflict(CARRIER_ID_TABLE, null, contentVal,
+                                SQLiteDatabase.CONFLICT_IGNORE) > 0) {
+                            rows++;
+                        } else {
+                            Log.e(TAG, "updateDatabaseFromPB insertion failure, row: "
+                                    + rows + "carrier id: " + id.canonicalId);
+                            // TODO metrics
+                        }
+                    }
+                }
             }
-        }
-        db.delete(CARRIER_ID_TABLE, null, null);
-        for (ContentValues cv : cvs) {
-            if (db.insertOrThrow(CARRIER_ID_TABLE, null, cv) > 0) rows++;
-        }
-        Log.d(TAG, "init database from pb. inserted rows = " + rows);
-        if (rows > 0) {
-            // Notify listener of DB change
-            getContext().getContentResolver().notifyChange(CarrierIdentification.CONTENT_URI,
-                    null);
+            Log.d(TAG, "update database from pb. inserted rows = " + rows);
+            if (rows > 0) {
+                // Notify listener of DB change
+                getContext().getContentResolver().notifyChange(CarrierIdentification.CONTENT_URI,
+                        null);
+            }
+            setAppliedVersion(carrierList.version);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
         }
         return rows;
     }
@@ -454,13 +491,13 @@ public class CarrierIdProvider extends ContentProvider {
 
     private int getAppliedVersion() {
         final SharedPreferences sp = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
-        return sp.getInt(VERSION_PREF_KEY, -1);
+        return sp.getInt(VERSION_KEY, -1);
     }
 
     private void setAppliedVersion(int version) {
         final SharedPreferences sp = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
         SharedPreferences.Editor editor = sp.edit();
-        editor.putInt(VERSION_PREF_KEY, version);
+        editor.putInt(VERSION_KEY, version);
         editor.apply();
     }
 
@@ -477,5 +514,23 @@ public class CarrierIdProvider extends ContentProvider {
         }
         buffer.flush();
         return buffer.toByteArray();
+    }
+
+    private void checkReadPermission() {
+        int status = getContext().checkCallingOrSelfPermission(
+                "android.permission.READ_PRIVILEGED_PHONE_STATE");
+        if (status == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        throw new SecurityException("No permission to read Carrier Identification provider");
+    }
+
+    private void checkWritePermission() {
+        int status = getContext().checkCallingOrSelfPermission(
+                "android.permission.MODIFY_PHONE_STATE");
+        if (status == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        throw new SecurityException("No permission to write Carrier Identification provider");
     }
 }

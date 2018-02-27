@@ -27,6 +27,7 @@ import static android.provider.Telephony.Carriers.CARRIER_EDITED;
 import static android.provider.Telephony.Carriers.CARRIER_ENABLED;
 import static android.provider.Telephony.Carriers.CONTENT_URI;
 import static android.provider.Telephony.Carriers.CURRENT;
+import static android.provider.Telephony.Carriers.DEFAULT_SORT_ORDER;
 import static android.provider.Telephony.Carriers.EDITED;
 import static android.provider.Telephony.Carriers.MAX_CONNS;
 import static android.provider.Telephony.Carriers.MAX_CONNS_TIME;
@@ -104,7 +105,11 @@ import android.util.Xml;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.IApnSourceService;
+import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.SubscriptionController;
+import com.android.internal.telephony.dataconnection.ApnSetting;
+import com.android.internal.telephony.uicc.IccRecords;
+import com.android.internal.telephony.uicc.UiccController;
 import com.android.internal.util.XmlUtils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -127,7 +132,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 24 << 16;
+    private static final int DATABASE_VERSION = 25 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -147,13 +152,15 @@ public class TelephonyProvider extends ContentProvider
     private static final int URL_DPC = 16;
     private static final int URL_DPC_ID = 17;
     private static final int URL_FILTERED = 18;
-    private static final int URL_ENFORCE_MANAGED = 19;
+    private static final int URL_FILTERED_ID = 19;
+    private static final int URL_ENFORCE_MANAGED = 20;
 
 
     private static final String TAG = "TelephonyProvider";
     private static final String CARRIERS_TABLE = "carriers";
     private static final String CARRIERS_TABLE_TMP = "carriers_tmp";
     private static final String SIMINFO_TABLE = "siminfo";
+    private static final String SIMINFO_TABLE_TMP = "siminfo_tmp";
 
     private static final String PREF_FILE_APN = "preferred-apn";
     private static final String COLUMN_APN_ID = "apn_id";
@@ -205,11 +212,19 @@ public class TelephonyProvider extends ContentProvider
     private static final String IS_OWNED_BY_DPC = OWNED_BY + "=" + OWNED_BY_DPC;
     private static final String IS_NOT_OWNED_BY_DPC = OWNED_BY + "!=" + OWNED_BY_DPC;
 
+    // Indicate whether the preset APN can be deleted
+    // The default value is false means user can delete it
+    private static final String PERSISTENT = "persistent";
+    // Indicate whether the preset APN can be modified
+    // The default value is false means user can modify it
+    private static final String READ_ONLY = "read_only";
+
     private static final int INVALID_APN_ID = -1;
     private static final List<String> CARRIERS_UNIQUE_FIELDS = new ArrayList<String>();
     private static final Map<String, String> CARRIERS_UNIQUE_FIELDS_DEFAULTS = new HashMap();
 
-    private static Boolean s_apnSourceServiceExists;
+    @VisibleForTesting
+    static Boolean s_apnSourceServiceExists;
 
     protected final Object mLock = new Object();
     @GuardedBy("mLock")
@@ -284,6 +299,8 @@ public class TelephonyProvider extends ContentProvider
                 USER_VISIBLE + " BOOLEAN DEFAULT 1," +
                 USER_EDITABLE + " BOOLEAN DEFAULT 1," +
                 OWNED_BY + " INTEGER DEFAULT " + OWNED_BY_OTHERS + "," +
+                PERSISTENT + " BOOLEAN DEFAULT 0," +
+                READ_ONLY + " BOOLEAN DEFAULT 0," +
                 // Uniqueness collisions are used to trigger merge code so if a field is listed
                 // here it means we will accept both (user edited + new apn_conf definition)
                 // Columns not included in UNIQUE constraint: name, current, edited,
@@ -294,48 +311,52 @@ public class TelephonyProvider extends ContentProvider
     }
 
     @VisibleForTesting
-    public static final String CREATE_SIMINFO_TABLE_STRING = "CREATE TABLE " + SIMINFO_TABLE + "("
-            + SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID
+    public static String getStringForSimInfoTableCreation(String tableName) {
+        return "CREATE TABLE " + tableName + "("
+                + SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID
                 + " INTEGER PRIMARY KEY AUTOINCREMENT,"
-            + SubscriptionManager.ICC_ID + " TEXT NOT NULL,"
-            + SubscriptionManager.SIM_SLOT_INDEX
+                + SubscriptionManager.ICC_ID + " TEXT NOT NULL,"
+                + SubscriptionManager.SIM_SLOT_INDEX
                 + " INTEGER DEFAULT " + SubscriptionManager.SIM_NOT_INSERTED + ","
-            + SubscriptionManager.DISPLAY_NAME + " TEXT,"
-            + SubscriptionManager.CARRIER_NAME + " TEXT,"
-            + SubscriptionManager.NAME_SOURCE
+                + SubscriptionManager.DISPLAY_NAME + " TEXT,"
+                + SubscriptionManager.CARRIER_NAME + " TEXT,"
+                + SubscriptionManager.NAME_SOURCE
                 + " INTEGER DEFAULT " + SubscriptionManager.NAME_SOURCE_DEFAULT_SOURCE + ","
-            + SubscriptionManager.COLOR + " INTEGER DEFAULT " + SubscriptionManager.COLOR_DEFAULT + ","
-            + SubscriptionManager.NUMBER + " TEXT,"
-            + SubscriptionManager.DISPLAY_NUMBER_FORMAT
+                + SubscriptionManager.COLOR + " INTEGER DEFAULT "
+                + SubscriptionManager.COLOR_DEFAULT + ","
+                + SubscriptionManager.NUMBER + " TEXT,"
+                + SubscriptionManager.DISPLAY_NUMBER_FORMAT
                 + " INTEGER NOT NULL DEFAULT " + SubscriptionManager.DISPLAY_NUMBER_DEFAULT + ","
-            + SubscriptionManager.DATA_ROAMING
+                + SubscriptionManager.DATA_ROAMING
                 + " INTEGER DEFAULT " + SubscriptionManager.DATA_ROAMING_DEFAULT + ","
-            + SubscriptionManager.MCC + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.MNC + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.SIM_PROVISIONING_STATUS
+                + SubscriptionManager.MCC + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.MNC + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.SIM_PROVISIONING_STATUS
                 + " INTEGER DEFAULT " + SubscriptionManager.SIM_PROVISIONED + ","
-            + SubscriptionManager.IS_EMBEDDED + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.ACCESS_RULES + " BLOB,"
-            + SubscriptionManager.IS_REMOVABLE + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.CB_EXTREME_THREAT_ALERT + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_SEVERE_THREAT_ALERT + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_AMBER_ALERT + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_EMERGENCY_ALERT + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_ALERT_SOUND_DURATION + " INTEGER DEFAULT 4,"
-            + SubscriptionManager.CB_ALERT_REMINDER_INTERVAL + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.CB_ALERT_VIBRATE + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_ALERT_SPEECH + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_ETWS_TEST_ALERT + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.CB_CHANNEL_50_ALERT + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.CB_CMAS_TEST_ALERT + " INTEGER DEFAULT 0,"
-            + SubscriptionManager.CB_OPT_OUT_DIALOG + " INTEGER DEFAULT 1,"
-            + SubscriptionManager.ENHANCED_4G_MODE_ENABLED + " INTEGER DEFAULT -1,"
-            + SubscriptionManager.VT_IMS_ENABLED + " INTEGER DEFAULT -1,"
-            + SubscriptionManager.WFC_IMS_ENABLED + " INTEGER DEFAULT -1,"
-            + SubscriptionManager.WFC_IMS_MODE + " INTEGER DEFAULT -1,"
-            + SubscriptionManager.WFC_IMS_ROAMING_MODE + " INTEGER DEFAULT -1,"
-            + SubscriptionManager.WFC_IMS_ROAMING_ENABLED + " INTEGER DEFAULT -1"
-            + ");";
+                + SubscriptionManager.IS_EMBEDDED + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.CARD_ID + " TEXT NOT NULL,"
+                + SubscriptionManager.ACCESS_RULES + " BLOB,"
+                + SubscriptionManager.IS_REMOVABLE + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.CB_EXTREME_THREAT_ALERT + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_SEVERE_THREAT_ALERT + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_AMBER_ALERT + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_EMERGENCY_ALERT + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_ALERT_SOUND_DURATION + " INTEGER DEFAULT 4,"
+                + SubscriptionManager.CB_ALERT_REMINDER_INTERVAL + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.CB_ALERT_VIBRATE + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_ALERT_SPEECH + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_ETWS_TEST_ALERT + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.CB_CHANNEL_50_ALERT + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.CB_CMAS_TEST_ALERT + " INTEGER DEFAULT 0,"
+                + SubscriptionManager.CB_OPT_OUT_DIALOG + " INTEGER DEFAULT 1,"
+                + SubscriptionManager.ENHANCED_4G_MODE_ENABLED + " INTEGER DEFAULT -1,"
+                + SubscriptionManager.VT_IMS_ENABLED + " INTEGER DEFAULT -1,"
+                + SubscriptionManager.WFC_IMS_ENABLED + " INTEGER DEFAULT -1,"
+                + SubscriptionManager.WFC_IMS_MODE + " INTEGER DEFAULT -1,"
+                + SubscriptionManager.WFC_IMS_ROAMING_MODE + " INTEGER DEFAULT -1,"
+                + SubscriptionManager.WFC_IMS_ROAMING_ENABLED + " INTEGER DEFAULT -1"
+                + ");";
+    }
 
     static {
         s_urlMatcher.addURI("telephony", "carriers", URL_TELEPHONY);
@@ -364,6 +385,9 @@ public class TelephonyProvider extends ContentProvider
         // Only called by Settings app, DcTracker and other telephony components to get APN list
         // according to whether DPC records are enforced.
         s_urlMatcher.addURI("telephony", "carriers/filtered", URL_FILTERED);
+        // Only called by Settings app, DcTracker and other telephony components to get a
+        // single APN according to whether DPC records are enforced.
+        s_urlMatcher.addURI("telephony", "carriers/filtered/#", URL_FILTERED_ID);
         // Only Called by DevicePolicyManager to enforce DPC records.
         s_urlMatcher.addURI("telephony", "carriers/enforce_managed", URL_ENFORCE_MANAGED);
 
@@ -432,7 +456,7 @@ public class TelephonyProvider extends ContentProvider
         @Override
         public void onCreate(SQLiteDatabase db) {
             if (DBG) log("dbh.onCreate:+ db=" + db);
-            createSimInfoTable(db);
+            createSimInfoTable(db, SIMINFO_TABLE);
             createCarriersTable(db, CARRIERS_TABLE);
             // if CarrierSettings app is installed, we expect it to do the initializiation instead
             if (apnSourceServiceExists(mContext)) {
@@ -454,7 +478,7 @@ public class TelephonyProvider extends ContentProvider
             } catch (SQLiteException e) {
                 loge("Exception " + SIMINFO_TABLE + "e=" + e);
                 if (e.getMessage().startsWith("no such table")) {
-                    createSimInfoTable(db);
+                    createSimInfoTable(db, SIMINFO_TABLE);
                 }
             }
             try {
@@ -469,9 +493,9 @@ public class TelephonyProvider extends ContentProvider
             if (VDBG) log("dbh.onOpen:- db=" + db);
         }
 
-        private void createSimInfoTable(SQLiteDatabase db) {
-            if (DBG) log("dbh.createSimInfoTable:+");
-            db.execSQL(CREATE_SIMINFO_TABLE_STRING);
+        private void createSimInfoTable(SQLiteDatabase db, String tableName) {
+            if (DBG) log("dbh.createSimInfoTable:+ " + tableName);
+            db.execSQL(getStringForSimInfoTableCreation(tableName));
             if (DBG) log("dbh.createSimInfoTable:-");
         }
 
@@ -963,15 +987,140 @@ public class TelephonyProvider extends ContentProvider
                     c = db.query(CARRIERS_TABLE, proj, null, null, null, null, null);
                     log("dbh.onUpgrade:- after upgrading total number of rows: " + c.getCount());
                     c.close();
-                    c = db.query(CARRIERS_TABLE, proj, NETWORK_TYPE_BITMASK, null, null, null, null);
+                    c = db.query(
+                            CARRIERS_TABLE, proj, NETWORK_TYPE_BITMASK, null, null, null, null);
                     log("dbh.onUpgrade:- after upgrading total number of rows with "
                             + NETWORK_TYPE_BITMASK + ": " + c.getCount());
                     c.close();
                 }
                 oldVersion = 24 << 16 | 6;
             }
+            if (oldVersion < (25 << 16 | 6)) {
+                // Add a new column SubscriptionManager.CARD_ID into the database and set the value
+                // to be the same as the existing column SubscriptionManager.ICC_ID. In order to do
+                // this, we need to first make a copy of the existing SIMINFO_TABLE, set the value
+                // of the new column SubscriptionManager.CARD_ID, and replace the SIMINFO_TABLE with
+                // the new table.
+                Cursor c = null;
+                String[] proj = {SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID};
+                recreateSimInfoDB(c, db, proj);
+                if (VDBG) {
+                    c = db.query(SIMINFO_TABLE, proj, null, null, null, null, null);
+                    log("dbh.onUpgrade:- after upgrading " + SIMINFO_TABLE
+                            + " total number of rows: " + c.getCount());
+                    c.close();
+                    c = db.query(SIMINFO_TABLE, proj, SubscriptionManager.CARD_ID + " IS NOT NULL",
+                            null, null, null, null);
+                    log("dbh.onUpgrade:- after upgrading total number of rows with "
+                            + SubscriptionManager.CARD_ID + ": " + c.getCount());
+                    c.close();
+                }
+                oldVersion = 25 << 16 | 6;
+            }
             if (DBG) {
                 log("dbh.onUpgrade:- db=" + db + " oldV=" + oldVersion + " newV=" + newVersion);
+            }
+        }
+
+        private void recreateSimInfoDB(Cursor c, SQLiteDatabase db, String[] proj) {
+            if (VDBG) {
+                c = db.query(SIMINFO_TABLE, proj, null, null, null, null, null);
+                log("dbh.onUpgrade:+ before upgrading " + SIMINFO_TABLE +
+                        " total number of rows: " + c.getCount());
+                c.close();
+            }
+
+            c = db.query(SIMINFO_TABLE, null, null, null, null, null, null);
+
+            db.execSQL("DROP TABLE IF EXISTS " + SIMINFO_TABLE_TMP);
+
+            createSimInfoTable(db, SIMINFO_TABLE_TMP);
+
+            copySimInfoDataToTmpTable(db, c);
+            c.close();
+
+            db.execSQL("DROP TABLE IF EXISTS " + SIMINFO_TABLE);
+
+            db.execSQL("ALTER TABLE " + SIMINFO_TABLE_TMP + " rename to " + SIMINFO_TABLE + ";");
+
+        }
+
+        private void copySimInfoDataToTmpTable(SQLiteDatabase db, Cursor c) {
+            // Move entries from SIMINFO_TABLE to SIMINFO_TABLE_TMP
+            if (c != null) {
+                while (c.moveToNext()) {
+                    ContentValues cv = new ContentValues();
+                    copySimInfoValuesV24(cv, c);
+                    // The card ID is supposed to be the ICCID of the profile for UICC card, and
+                    // the EID of the card for eUICC card. Since EID is unknown for old entries in
+                    // SIMINFO_TABLE, we use ICCID as the card ID for all the old entries while
+                    // upgrading the SIMINFO_TABLE. In UiccController, both the card ID and ICCID
+                    // will be checked when user queries the slot information using the card ID
+                    // from the database.
+                    getCardIdfromIccid(cv, c);
+                    try {
+                        db.insert(SIMINFO_TABLE_TMP, null, cv);
+                        if (VDBG) {
+                            log("dbh.copySimInfoDataToTmpTable: db.insert returned >= 0; " +
+                                "insert successful for cv " + cv);
+                        }
+                    } catch (SQLException e) {
+                        if (VDBG)
+                            log("dbh.copySimInfoDataToTmpTable insertWithOnConflict exception " +
+                                e + " for cv " + cv);
+                    }
+                }
+            }
+        }
+
+        private void copySimInfoValuesV24(ContentValues cv, Cursor c) {
+            // String vals
+            getStringValueFromCursor(cv, c, SubscriptionManager.ICC_ID);
+            getStringValueFromCursor(cv, c, SubscriptionManager.DISPLAY_NAME);
+            getStringValueFromCursor(cv, c, SubscriptionManager.CARRIER_NAME);
+            getStringValueFromCursor(cv, c, SubscriptionManager.NUMBER);
+
+            // bool/int vals
+            getIntValueFromCursor(cv, c, SubscriptionManager.SIM_SLOT_INDEX);
+            getIntValueFromCursor(cv, c, SubscriptionManager.NAME_SOURCE);
+            getIntValueFromCursor(cv, c, SubscriptionManager.COLOR);
+            getIntValueFromCursor(cv, c, SubscriptionManager.DISPLAY_NUMBER_FORMAT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.DATA_ROAMING);
+            getIntValueFromCursor(cv, c, SubscriptionManager.MCC);
+            getIntValueFromCursor(cv, c, SubscriptionManager.MNC);
+            getIntValueFromCursor(cv, c, SubscriptionManager.SIM_PROVISIONING_STATUS);
+            getIntValueFromCursor(cv, c, SubscriptionManager.IS_EMBEDDED);
+            getIntValueFromCursor(cv, c, SubscriptionManager.IS_REMOVABLE);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_EXTREME_THREAT_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_SEVERE_THREAT_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_AMBER_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_EMERGENCY_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_ALERT_SOUND_DURATION);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_ALERT_REMINDER_INTERVAL);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_ALERT_VIBRATE);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_ALERT_SPEECH);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_ETWS_TEST_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_CHANNEL_50_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_CMAS_TEST_ALERT);
+            getIntValueFromCursor(cv, c, SubscriptionManager.CB_OPT_OUT_DIALOG);
+            getIntValueFromCursor(cv, c, SubscriptionManager.ENHANCED_4G_MODE_ENABLED);
+            getIntValueFromCursor(cv, c, SubscriptionManager.VT_IMS_ENABLED);
+            getIntValueFromCursor(cv, c, SubscriptionManager.WFC_IMS_ENABLED);
+            getIntValueFromCursor(cv, c, SubscriptionManager.WFC_IMS_MODE);
+            getIntValueFromCursor(cv, c, SubscriptionManager.WFC_IMS_ROAMING_MODE);
+            getIntValueFromCursor(cv, c, SubscriptionManager.WFC_IMS_ROAMING_ENABLED);
+
+            // Blob vals
+            getBlobValueFromCursor(cv, c, SubscriptionManager.ACCESS_RULES);
+        }
+
+        private void getCardIdfromIccid(ContentValues cv, Cursor c) {
+            int columnIndex = c.getColumnIndex(SubscriptionManager.ICC_ID);
+            if (columnIndex != -1) {
+                String fromCursor = c.getString(columnIndex);
+                if (!TextUtils.isEmpty(fromCursor)) {
+                    cv.put(SubscriptionManager.CARD_ID, fromCursor);
+                }
             }
         }
 
@@ -1397,6 +1546,16 @@ public class TelephonyProvider extends ContentProvider
             }
         }
 
+        private void getBlobValueFromCursor(ContentValues cv, Cursor c, String key) {
+            int columnIndex = c.getColumnIndex(key);
+            if (columnIndex != -1) {
+                byte[] fromCursor = c.getBlob(columnIndex);
+                if (fromCursor != null) {
+                    cv.put(key, fromCursor);
+                }
+            }
+        }
+
         /**
          * Gets the next row of apn values.
          *
@@ -1453,6 +1612,8 @@ public class TelephonyProvider extends ContentProvider
             addBoolAttribute(parser, "modem_cognitive", map, MODEM_COGNITIVE);
             addBoolAttribute(parser, "user_visible", map, USER_VISIBLE);
             addBoolAttribute(parser, "user_editable", map, USER_EDITABLE);
+            addBoolAttribute(parser, "persistent", map, PERSISTENT);
+            addBoolAttribute(parser, "read_only", map, READ_ONLY);
 
             int networkTypeBitmask = 0;
             String networkTypeList = parser.getAttributeValue(null, "network_type_bitmask");
@@ -2161,12 +2322,13 @@ public class TelephonyProvider extends ContentProvider
         }
     }
 
-    boolean isCallingFromSystemUid() {
-        return mInjector.binderGetCallingUid() == Process.SYSTEM_UID;
+    boolean isCallingFromSystemOrPhoneUid() {
+        return mInjector.binderGetCallingUid() == Process.SYSTEM_UID ||
+                mInjector.binderGetCallingUid() == Process.PHONE_UID;
     }
 
-    void ensureCallingFromSystemUid(String message) {
-        if (!isCallingFromSystemUid()) {
+    void ensureCallingFromSystemOrPhoneUid(String message) {
+        if (!isCallingFromSystemOrPhoneUid()) {
             throw new SecurityException(message);
         }
     }
@@ -2252,12 +2414,16 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_DPC: {
-                ensureCallingFromSystemUid("URL_DPC called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid("URL_DPC called from non SYSTEM_UID.");
                 // DPC query only returns DPC records.
                 constraints.add(IS_OWNED_BY_DPC);
                 break;
             }
 
+            case URL_FILTERED_ID: {
+                constraints.add("_id = " + url.getLastPathSegment());
+            }
+            //intentional fall through from above case
             case URL_FILTERED: {
                 if(isManagedApnEnforced()) {
                     // If enforced, return DPC records only.
@@ -2270,7 +2436,8 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_ENFORCE_MANAGED: {
-                ensureCallingFromSystemUid("URL_ENFORCE_MANAGED called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid(
+                        "URL_ENFORCE_MANAGED called from non SYSTEM_UID.");
                 MatrixCursor cursor = new MatrixCursor(new String[]{ENFORCED_KEY});
                 cursor.addRow(new Object[]{isManagedApnEnforced() ? 1 : 0});
                 return cursor;
@@ -2345,6 +2512,7 @@ public class TelephonyProvider extends ContentProvider
             return "vnd.android.cursor.dir/telephony-carrier";
 
         case URL_ID:
+        case URL_FILTERED_ID:
             return "vnd.android.cursor.item/telephony-carrier";
 
         case URL_PREFERAPN_USING_SUBID:
@@ -2546,7 +2714,7 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_DPC: {
-                ensureCallingFromSystemUid("URL_DPC called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid("URL_DPC called from non SYSTEM_UID.");
 
                 ContentValues values;
                 if (initialValues != null) {
@@ -2708,7 +2876,7 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_DPC_ID: {
-                ensureCallingFromSystemUid("URL_DPC_ID called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid("URL_DPC_ID called from non SYSTEM_UID.");
 
                 // Only delete if owned by DPC.
                 count = db.delete(CARRIERS_TABLE, "(" + _ID + "=?)" + " and " + IS_OWNED_BY_DPC,
@@ -2869,7 +3037,7 @@ public class TelephonyProvider extends ContentProvider
 
             case URL_DPC_ID:
             {
-                ensureCallingFromSystemUid("URL_DPC_ID called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid("URL_DPC_ID called from non SYSTEM_UID.");
 
                 if (where != null || whereArgs != null) {
                     throw new UnsupportedOperationException(
@@ -2882,7 +3050,8 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_ENFORCE_MANAGED: {
-                ensureCallingFromSystemUid("URL_ENFORCE_MANAGED called from non SYSTEM_UID.");
+                ensureCallingFromSystemOrPhoneUid(
+                        "URL_ENFORCE_MANAGED called from non SYSTEM_UID.");
                 if (values != null) {
                     if (values.containsKey(ENFORCED_KEY)) {
                         setManagedApnEnforced(values.getAsBoolean(ENFORCED_KEY));
@@ -2943,9 +3112,19 @@ public class TelephonyProvider extends ContentProvider
 
     private void restoreDefaultAPN(int subId) {
         SQLiteDatabase db = getWritableDatabase();
+        TelephonyManager telephonyManager =
+                (TelephonyManager) getContext().getSystemService(Context.TELEPHONY_SERVICE);
+        String where = null;
+        if (telephonyManager.getPhoneCount() > 1) {
+            where = getWhereClauseForRestoreDefaultApn(db, subId);
+        }
+        if (TextUtils.isEmpty(where)) {
+            where = IS_NOT_OWNED_BY_DPC;
+        }
+        log("restoreDefaultAPN: where: " + where);
 
         try {
-            db.delete(CARRIERS_TABLE, IS_NOT_OWNED_BY_DPC, null);
+            db.delete(CARRIERS_TABLE, where, null);
         } catch (SQLException e) {
             loge("got exception when deleting to restore: " + e);
         }
@@ -2969,6 +3148,54 @@ public class TelephonyProvider extends ContentProvider
         } else {
             initDatabaseWithDatabaseHelper(db);
         }
+    }
+
+    private String getWhereClauseForRestoreDefaultApn(SQLiteDatabase db, int subId) {
+        IccRecords iccRecords = getIccRecords(subId);
+        if (iccRecords == null) {
+            return null;
+        }
+        TelephonyManager telephonyManager =
+                (TelephonyManager) getContext().getSystemService(Context.TELEPHONY_SERVICE);
+        String simOperator = telephonyManager.getSimOperator(subId);
+        Cursor cursor = db.query(CARRIERS_TABLE, new String[] {MVNO_TYPE, MVNO_MATCH_DATA},
+                NUMERIC + "='" + simOperator + "'", null, null, null, DEFAULT_SORT_ORDER);
+        String where = null;
+
+        if (cursor != null) {
+            cursor.moveToFirst();
+            while (!cursor.isAfterLast()) {
+                String mvnoType = cursor.getString(0 /* MVNO_TYPE index */);
+                String mvnoMatchData = cursor.getString(1 /* MVNO_MATCH_DATA index */);
+                if (!TextUtils.isEmpty(mvnoType) && !TextUtils.isEmpty(mvnoMatchData)
+                        && ApnSetting.mvnoMatches(iccRecords, mvnoType, mvnoMatchData)) {
+                    where = NUMERIC + "='" + simOperator + "'"
+                            + " AND " + MVNO_TYPE + "='" + mvnoType + "'"
+                            + " AND " + MVNO_MATCH_DATA + "='" + mvnoMatchData + "'"
+                            + " AND " + IS_NOT_OWNED_BY_DPC;
+                    break;
+                }
+                cursor.moveToNext();
+            }
+            cursor.close();
+
+            if (TextUtils.isEmpty(where)) {
+                where = NUMERIC + "='" + simOperator + "'"
+                        + " AND (" + MVNO_TYPE + "='' OR " + MVNO_MATCH_DATA + "='')"
+                        + " AND " + IS_NOT_OWNED_BY_DPC;
+            }
+        }
+        return where;
+    }
+
+    @VisibleForTesting
+    IccRecords getIccRecords(int subId) {
+        TelephonyManager telephonyManager =
+                TelephonyManager.from(getContext()).createForSubscriptionId(subId);
+        int family = telephonyManager.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM ?
+                UiccController.APP_FAM_3GPP : UiccController.APP_FAM_3GPP2;
+        return UiccController.getInstance().getIccRecords(
+                SubscriptionManager.getPhoneId(subId), family);
     }
 
     private synchronized void updateApnDb() {
