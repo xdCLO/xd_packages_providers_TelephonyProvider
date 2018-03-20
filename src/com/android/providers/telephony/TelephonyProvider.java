@@ -2360,7 +2360,6 @@ public class TelephonyProvider extends ContentProvider
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 constraints.add(NUMERIC + " = '" + mTelephonyManager.getSimOperator(subId) + "'");
-                constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             // intentional fall through from above case
             case URL_TELEPHONY: {
@@ -2377,7 +2376,6 @@ public class TelephonyProvider extends ContentProvider
                     return null;
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
-                constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             //intentional fall through from above case
             case URL_CURRENT: {
@@ -2404,7 +2402,6 @@ public class TelephonyProvider extends ContentProvider
                     return null;
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
-                constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             //intentional fall through from above case
             case URL_PREFERAPN:
@@ -2638,7 +2635,6 @@ public class TelephonyProvider extends ContentProvider
                     values = new ContentValues();
                 }
 
-                values.put(SUBSCRIPTION_ID, subId);
                 values = DatabaseHelper.setDefaultValue(values);
                 if (!values.containsKey(EDITED)) {
                     values.put(EDITED, CARRIER_EDITED);
@@ -2725,9 +2721,15 @@ public class TelephonyProvider extends ContentProvider
                 values.put(OWNED_BY, OWNED_BY_DPC);
                 // DPC records should not be user editable.
                 values.put(USER_EDITABLE, false);
-                Pair<Uri, Boolean> ret = insertRowWithValue(values);
-                result = ret.first;
-                notify = ret.second;
+
+                final long rowID = db.insertWithOnConflict(CARRIERS_TABLE, null, values,
+                        SQLiteDatabase.CONFLICT_IGNORE);
+                if (rowID >= 0) {
+                    result = ContentUris.withAppendedId(CONTENT_URI, rowID);
+                    notify = true;
+                }
+                if (VDBG) log("insert: inserted " + values.toString() + " rowID = " + rowID);
+
                 break;
             }
 
@@ -2844,11 +2846,15 @@ public class TelephonyProvider extends ContentProvider
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
-                // FIXME use subId in query
             }
+            // intentional fall through from above case
+
             case URL_RESTOREAPN: {
                 count = 1;
                 restoreDefaultAPN(subId);
+                getContext().getContentResolver().notifyChange(
+                        Uri.withAppendedPath(CONTENT_URI, "restore/subId/" + subId), null,
+                        true, UserHandle.USER_ALL);
                 break;
             }
 
@@ -3043,7 +3049,7 @@ public class TelephonyProvider extends ContentProvider
                 }
                 count = db.updateWithOnConflict(CARRIERS_TABLE, values,
                         _ID + "=?" + " and " + IS_OWNED_BY_DPC,
-                        new String[] { url.getLastPathSegment() }, SQLiteDatabase.CONFLICT_REPLACE);
+                        new String[] { url.getLastPathSegment() }, SQLiteDatabase.CONFLICT_IGNORE);
                 break;
             }
 
