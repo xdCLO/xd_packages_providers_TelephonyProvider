@@ -2360,6 +2360,8 @@ public class TelephonyProvider extends ContentProvider
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 constraints.add(NUMERIC + " = '" + mTelephonyManager.getSimOperator(subId) + "'");
+                // TODO b/74213956 turn this back on once insertion includes correct sub id
+                // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             // intentional fall through from above case
             case URL_TELEPHONY: {
@@ -2376,6 +2378,8 @@ public class TelephonyProvider extends ContentProvider
                     return null;
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
+                // TODO b/74213956 turn this back on once insertion includes correct sub id
+                // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             //intentional fall through from above case
             case URL_CURRENT: {
@@ -2402,6 +2406,8 @@ public class TelephonyProvider extends ContentProvider
                     return null;
                 }
                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
+                // TODO b/74213956 turn this back on once insertion includes correct sub id
+                // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
             //intentional fall through from above case
             case URL_PREFERAPN:
