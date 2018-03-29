@@ -106,7 +106,6 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.IApnSourceService;
 import com.android.internal.telephony.PhoneConstants;
-import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.dataconnection.ApnSetting;
 import com.android.internal.telephony.uicc.IccRecords;
 import com.android.internal.telephony.uicc.UiccController;
@@ -218,6 +217,9 @@ public class TelephonyProvider extends ContentProvider
     // Indicate whether the preset APN can be modified
     // The default value is false means user can modify it
     private static final String READ_ONLY = "read_only";
+
+    private static final String ORDER_BY_SUB_ID =
+            SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + " ASC";
 
     private static final int INVALID_APN_ID = -1;
     private static final List<String> CARRIERS_UNIQUE_FIELDS = new ArrayList<String>();
@@ -1030,7 +1032,10 @@ public class TelephonyProvider extends ContentProvider
                 c.close();
             }
 
-            c = db.query(SIMINFO_TABLE, null, null, null, null, null, null);
+            // Sort in ascending order by subscription id to make sure the rows do not get flipped
+            // during the query and added in the new sim info table in another order (sub id is
+            // stored in settings between migrations).
+            c = db.query(SIMINFO_TABLE, null, null, null, null, null, ORDER_BY_SUB_ID);
 
             db.execSQL("DROP TABLE IF EXISTS " + SIMINFO_TABLE_TMP);
 
