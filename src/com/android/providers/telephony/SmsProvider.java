@@ -21,6 +21,8 @@ import static android.telephony.SmsMessage.ENCODING_7BIT;
 import static android.telephony.SmsMessage.ENCODING_UNKNOWN;
 import static android.telephony.SmsMessage.MAX_USER_DATA_BYTES;
 import static android.telephony.SmsMessage.MAX_USER_DATA_SEPTETS;
+import static com.android.internal.telephony.SmsResponse.NO_ERROR_CODE;
+
 import android.annotation.NonNull;
 import android.app.AppOpsManager;
 import android.content.ContentProvider;
@@ -110,7 +112,7 @@ public class SmsProvider extends ContentProvider {
         // N.B.: These columns must appear in the same order as the
         // calls to add appear in convertIccToSms.
         "service_center_address",       // getServiceCenterAddress
-        "address",                      // getDisplayOriginatingAddress
+        "address",                      // getDisplayOriginatingAddress or getRecipientAddress
         "message_class",                // getMessageClass
         "body",                         // getDisplayMessageBody
         "date",                         // getTimestampMillis
@@ -118,9 +120,9 @@ public class SmsProvider extends ContentProvider {
         "index_on_icc",                 // getIndexOnIcc
         "is_status_report",             // isStatusReportMessage
         "transport_type",               // Always "sms".
-        "type",                         // Always MESSAGE_TYPE_ALL.
+        "type",                         // depend on getStatusOnIcc
         "locked",                       // Always 0 (false).
-        "error_code",                   // Always 0
+        "error_code",                   // Always -1 (NO_ERROR_CODE), previously it was 0 always.
         "_id",
         "sub_id"
     };
@@ -345,8 +347,6 @@ public class SmsProvider extends ContentProvider {
     }
 
     private Object[] convertIccToSms(SmsMessage message, int id, int subId) {
-        // N.B.: These calls must appear in the same order as the
-        // columns appear in ICC_COLUMNS.
         int statusOnIcc = message.getStatusOnIcc();
         int type = Sms.MESSAGE_TYPE_ALL;
         switch (statusOnIcc) {
@@ -363,8 +363,11 @@ public class SmsProvider extends ContentProvider {
         }
         Object[] row = new Object[14];
         row[0] = message.getServiceCenterAddress();
-        row[1] = (type == Sms.MESSAGE_TYPE_INBOX) ? message.getDisplayOriginatingAddress()
-                : message.getRecipientAddress();
+        row[1] =
+                (type == Sms.MESSAGE_TYPE_INBOX)
+                        ? message.getDisplayOriginatingAddress()
+                        : message.getRecipientAddress();
+
         row[2] = String.valueOf(message.getMessageClass());
         row[3] = message.getDisplayMessageBody();
         row[4] = message.getTimestampMillis();
@@ -374,7 +377,7 @@ public class SmsProvider extends ContentProvider {
         row[8] = "sms";
         row[9] = type;
         row[10] = 0;      // locked
-        row[11] = 0;      // error_code
+        row[11] = NO_ERROR_CODE;
         row[12] = id;
         row[13] = subId;
         return row;
@@ -702,7 +705,12 @@ public class SmsProvider extends ContentProvider {
             db.insert(TABLE_WORDS, Telephony.MmsSms.WordsTable.INDEXED_TEXT, cv);
         }
         if (rowID > 0) {
-            Uri uri = Uri.withAppendedPath(url, String.valueOf(rowID));
+            Uri uri = null;
+            if (table == TABLE_SMS) {
+                uri = Uri.withAppendedPath(Sms.CONTENT_URI, String.valueOf(rowID));
+            } else {
+                uri = Uri.withAppendedPath(url, String.valueOf(rowID));
+            }
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
                 Log.d(TAG, "insert " + uri + " succeeded");
             }
