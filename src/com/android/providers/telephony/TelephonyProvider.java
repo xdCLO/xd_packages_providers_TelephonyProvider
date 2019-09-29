@@ -146,7 +146,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 41 << 16;
+    private static final int DATABASE_VERSION = 42 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -370,6 +370,7 @@ public class TelephonyProvider extends ContentProvider
                 + SubscriptionManager.IS_EMBEDDED + " INTEGER DEFAULT 0,"
                 + SubscriptionManager.CARD_ID + " TEXT NOT NULL,"
                 + SubscriptionManager.ACCESS_RULES + " BLOB,"
+                + SubscriptionManager.ACCESS_RULES_FROM_CARRIER_CONFIGS + " BLOB,"
                 + SubscriptionManager.IS_REMOVABLE + " INTEGER DEFAULT 0,"
                 + SubscriptionManager.CB_EXTREME_THREAT_ALERT + " INTEGER DEFAULT 1,"
                 + SubscriptionManager.CB_SEVERE_THREAT_ALERT + " INTEGER DEFAULT 1,"
@@ -1346,6 +1347,19 @@ public class TelephonyProvider extends ContentProvider
                     }
                 }
                 oldVersion = 41 << 16 | 6;
+            }
+
+            if (oldVersion < (42 << 16 | 6)) {
+                try {
+                    // Try to update the siminfo table. It might not be there.
+                    db.execSQL("ALTER TABLE " + SIMINFO_TABLE + " ADD COLUMN " +
+                        SubscriptionManager.ACCESS_RULES_FROM_CARRIER_CONFIGS + " BLOB;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade skipping " + SIMINFO_TABLE + " upgrade. " +
+                                "The table will get created in onOpen.");
+                    }
+                }
             }
 
 
@@ -2564,25 +2578,6 @@ public class TelephonyProvider extends ContentProvider
 
         if (isNewBuild) {
             if (!apnSourceServiceExists(getContext())) {
-                // Call getReadableDatabase() to make sure onUpgrade is called
-                if (VDBG) log("onCreate: calling getReadableDatabase to trigger onUpgrade");
-                SQLiteDatabase db = getReadableDatabase();
-
-                // Get rid of old preferred apn shared preferences
-                SubscriptionManager sm = SubscriptionManager.from(getContext());
-                if (sm != null) {
-                    List<SubscriptionInfo> subInfoList = sm.getAllSubscriptionInfoList();
-                    for (SubscriptionInfo subInfo : subInfoList) {
-                        SharedPreferences spPrefFile = getContext().getSharedPreferences(
-                                PREF_FILE_APN + subInfo.getSubscriptionId(), Context.MODE_PRIVATE);
-                        if (spPrefFile != null) {
-                            SharedPreferences.Editor editor = spPrefFile.edit();
-                            editor.clear();
-                            editor.apply();
-                        }
-                    }
-                }
-
                 // Update APN DB
                 updateApnDb();
             }
@@ -2696,26 +2691,6 @@ public class TelephonyProvider extends ContentProvider
     private void deletePreferredApnId() {
         SharedPreferences sp = getContext().getSharedPreferences(PREF_FILE_APN,
                 Context.MODE_PRIVATE);
-
-        // Before deleting, save actual preferred apns (not the ids) in a separate SP.
-        // NOTE: This code to call setPreferredApn() can be removed since the function is now called
-        // from setPreferredApnId(). However older builds (pre oc-mr1) do not have that change, so
-        // when devices upgrade from those builds and this function is called, this code is needed
-        // otherwise the preferred APN will be lost.
-        Map<String, ?> allPrefApnId = sp.getAll();
-        for (String key : allPrefApnId.keySet()) {
-            // extract subId from key by removing COLUMN_APN_ID
-            try {
-                int subId = Integer.parseInt(key.replace(COLUMN_APN_ID, ""));
-                long apnId = getPreferredApnId(subId, false);
-                if (apnId != INVALID_APN_ID) {
-                    setPreferredApn(apnId, subId);
-                }
-            } catch (Exception e) {
-                loge("Skipping over key " + key + " due to exception " + e);
-            }
-        }
-
         SharedPreferences.Editor editor = sp.edit();
         editor.clear();
         editor.apply();
@@ -3803,15 +3778,6 @@ public class TelephonyProvider extends ContentProvider
             }
         }
         throw new SecurityException("No permission to write APN settings");
-    }
-
-    private void checkPhonePrivilegePermission() {
-        int status = getContext().checkCallingOrSelfPermission(
-                "android.permission.READ_PRIVILEGED_PHONE_STATE");
-        if (status == PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        throw new SecurityException("No phone privilege permission");
     }
 
     private DatabaseHelper mOpenHelper;
