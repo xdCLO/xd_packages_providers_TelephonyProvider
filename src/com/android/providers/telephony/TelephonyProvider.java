@@ -3106,11 +3106,13 @@ public class TelephonyProvider extends ContentProvider
                 // 1. The APN that query based on legacy SIM MCC/MCC and MVNO
                 currentCursor.addRow(data);
             } else if (!TextUtils.isEmpty(ret.getString(numericIndex))
+                    && ret.getString(numericIndex).equals(mccmnc)
                     && TextUtils.isEmpty(ret.getString(mvnoIndex))) {
                 // 2. The APN that query based on SIM MCC/MNC
                 parentCursor.addRow(data);
             } else if (!TextUtils.isEmpty(ret.getString(carrierIdIndex))
-                    && ret.getString(carrierIdIndex).equals(String.valueOf(carrierId))) {
+                    && ret.getString(carrierIdIndex).equals(String.valueOf(carrierId))
+                    && carrierId != TelephonyManager.UNKNOWN_CARRIER_ID) {
                 // The APN that query based on carrier Id (not include the MVNO or MNO APN)
                 carrierIdCursor.addRow(data);
             }
@@ -3140,8 +3142,6 @@ public class TelephonyProvider extends ContentProvider
             for (String column : to.getColumnNames()) {
                 int index = to.getColumnIndex(column);
                 switch (to.getType(index)) {
-                    case Cursor.FIELD_TYPE_NULL:
-                        break;
                     case Cursor.FIELD_TYPE_INTEGER:
                         data.add(to.getInt(index));
                         break;
@@ -3152,6 +3152,7 @@ public class TelephonyProvider extends ContentProvider
                         data.add(to.getBlob(index));
                         break;
                     case Cursor.FIELD_TYPE_STRING:
+                    case Cursor.FIELD_TYPE_NULL:
                         data.add(to.getString(index));
                         break;
                 }
