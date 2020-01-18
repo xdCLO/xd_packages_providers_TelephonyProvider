@@ -60,7 +60,7 @@ import java.io.UnsupportedEncodingException;
 import java.text.SimpleDateFormat;
 import com.android.internal.annotations.VisibleForTesting;
 
-import java.util.ArrayList;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Locale;
 
@@ -397,16 +397,17 @@ public class SmsProvider extends ContentProvider {
      * Return a Cursor containing just one message from the ICC.
      */
     private Cursor getSingleMessageFromIcc(String messageIndexString, int subId) {
-        ArrayList<SmsMessage> messages;
         int messageIndex = -1;
         try {
             messageIndex = Integer.parseInt(messageIndexString);
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException("Bad SMS ICC ID: " + messageIndexString);
         }
+        List<SmsMessage> messages;
+        // Use phone id to avoid AppOps uid mismatch in telephony
         long token = Binder.clearCallingIdentity();
         try {
-            messages = SmsManager.getSmsManagerForSubscriptionId(subId).getAllMessagesFromIcc();
+            messages = SmsManager.getSmsManagerForSubscriptionId(subId).getMessagesFromIcc();
         } finally {
             Binder.restoreCallingIdentity(token);
         }
@@ -427,13 +428,13 @@ public class SmsProvider extends ContentProvider {
      * Return a Cursor listing all the messages stored on the ICC.
      */
     private Cursor getAllMessagesFromIcc(int subId) {
-        ArrayList<SmsMessage> messages;
+        List<SmsMessage> messages;
 
         // use phone app permissions to avoid UID mismatch in AppOpsManager.noteOp() call
         long token = Binder.clearCallingIdentity();
         try {
             messages = SmsManager.getSmsManagerForSubscriptionId(subId)
-                    .getAllMessagesFromIcc();
+                    .getMessagesFromIcc();
         } finally {
             Binder.restoreCallingIdentity(token);
         }

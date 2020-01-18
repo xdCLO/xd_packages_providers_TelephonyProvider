@@ -97,10 +97,11 @@ import android.os.Environment;
 import android.os.IBinder;
 import android.os.Process;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.provider.Telephony;
-import android.telephony.ServiceState;
+import android.telephony.Annotation;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.telephony.data.ApnSetting;
@@ -112,9 +113,8 @@ import android.util.Xml;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.telephony.PhoneConstants;
-import com.android.internal.telephony.dataconnection.ApnSettingUtils;
-import com.android.internal.telephony.uicc.IccRecords;
 import com.android.internal.telephony.uicc.UiccController;
 import com.android.internal.util.XmlUtils;
 import android.service.carrier.IApnSourceService;
@@ -147,7 +147,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 42 << 16;
+    private static final int DATABASE_VERSION = 43 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -255,6 +255,55 @@ public class TelephonyProvider extends ContentProvider
     private Injector mInjector;
 
     private boolean mManagedApnEnforced;
+
+    /**
+     * Available radio technologies for GSM, UMTS and CDMA.
+     * Duplicates the constants from hardware/radio/include/ril.h
+     * This should only be used by agents working with the ril.  Others
+     * should use the equivalent TelephonyManager.NETWORK_TYPE_*
+     */
+    private static final int RIL_RADIO_TECHNOLOGY_UNKNOWN = 0;
+    private static final int RIL_RADIO_TECHNOLOGY_GPRS = 1;
+    private static final int RIL_RADIO_TECHNOLOGY_EDGE = 2;
+    private static final int RIL_RADIO_TECHNOLOGY_UMTS = 3;
+    private static final int RIL_RADIO_TECHNOLOGY_IS95A = 4;
+    private static final int RIL_RADIO_TECHNOLOGY_IS95B = 5;
+    private static final int RIL_RADIO_TECHNOLOGY_1xRTT = 6;
+    private static final int RIL_RADIO_TECHNOLOGY_EVDO_0 = 7;
+    private static final int RIL_RADIO_TECHNOLOGY_EVDO_A = 8;
+    private static final int RIL_RADIO_TECHNOLOGY_HSDPA = 9;
+    private static final int RIL_RADIO_TECHNOLOGY_HSUPA = 10;
+    private static final int RIL_RADIO_TECHNOLOGY_HSPA = 11;
+    private static final int RIL_RADIO_TECHNOLOGY_EVDO_B = 12;
+    private static final int RIL_RADIO_TECHNOLOGY_EHRPD = 13;
+    private static final int RIL_RADIO_TECHNOLOGY_LTE = 14;
+    private static final int RIL_RADIO_TECHNOLOGY_HSPAP = 15;
+
+    /**
+     * GSM radio technology only supports voice. It does not support data.
+     */
+    private static final int RIL_RADIO_TECHNOLOGY_GSM = 16;
+    private static final int RIL_RADIO_TECHNOLOGY_TD_SCDMA = 17;
+
+    /**
+     * IWLAN
+     */
+    private static final int RIL_RADIO_TECHNOLOGY_IWLAN = 18;
+
+    /**
+     * LTE_CA
+     */
+    private static final int RIL_RADIO_TECHNOLOGY_LTE_CA = 19;
+
+    /**
+     * NR(New Radio) 5G.
+     */
+    private static final int  RIL_RADIO_TECHNOLOGY_NR = 20;
+
+    /**
+     * The number of the radio technologies.
+     */
+    private static final int NEXT_RIL_RADIO_TECHNOLOGY = 21;
 
     private static final Map<String, Integer> MVNO_TYPE_STRING_MAP;
 
@@ -416,7 +465,8 @@ public class TelephonyProvider extends ContentProvider
                 + SubscriptionManager.WHITE_LISTED_APN_DATA + " INTEGER DEFAULT 0,"
                 + SubscriptionManager.GROUP_OWNER + " TEXT,"
                 + SubscriptionManager.DATA_ENABLED_OVERRIDE_RULES + " TEXT,"
-                + SubscriptionManager.IMSI + " TEXT"
+                + SubscriptionManager.IMSI + " TEXT,"
+                + SubscriptionManager.UICC_APPLICATIONS_ENABLED + " INTEGER DEFAULT 1"
                 + ");";
     }
 
@@ -1395,6 +1445,21 @@ public class TelephonyProvider extends ContentProvider
                 }
             }
 
+            if (oldVersion < (43 << 16 | 6)) {
+                try {
+                    // Try to update the siminfo table. It might not be there.
+                    db.execSQL("ALTER TABLE " + SIMINFO_TABLE + " ADD COLUMN "
+                            + SubscriptionManager.UICC_APPLICATIONS_ENABLED
+                            + " INTEGER DEFAULT 1;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade skipping " + SIMINFO_TABLE + " upgrade. " +
+                                "The table will get created in onOpen.");
+                    }
+                }
+                oldVersion = 43 << 16 | 6;
+            }
+
 
             if (DBG) {
                 log("dbh.onUpgrade:- db=" + db + " oldV=" + oldVersion + " newV=" + newVersion);
@@ -1852,13 +1917,11 @@ public class TelephonyProvider extends ContentProvider
                         // Change bearer to a bitmask
                         String bearerStr = c.getString(c.getColumnIndex(BEARER));
                         if (!TextUtils.isEmpty(bearerStr)) {
-                            int bearer_bitmask = ServiceState.getBitmaskForTech(
-                                    Integer.parseInt(bearerStr));
+                            int bearer_bitmask = getBitmaskForTech(Integer.parseInt(bearerStr));
                             cv.put(BEARER_BITMASK, bearer_bitmask);
 
-                            int networkTypeBitmask = ServiceState.getBitmaskForTech(
-                                    ServiceState.rilRadioTechnologyToNetworkType(
-                                            Integer.parseInt(bearerStr)));
+                            int networkTypeBitmask = rilRadioTechnologyToNetworkTypeBitmask(
+                                    Integer.parseInt(bearerStr));
                             cv.put(NETWORK_TYPE_BITMASK, networkTypeBitmask);
                         }
 
@@ -1946,8 +2009,7 @@ public class TelephonyProvider extends ContentProvider
                 String fromCursor = c.getString(columnIndex);
                 if (!TextUtils.isEmpty(fromCursor) && fromCursor.matches("\\d+")) {
                     int networkBitmask = Integer.valueOf(fromCursor);
-                    int bearerBitmask = ServiceState.convertNetworkTypeBitmaskToBearerBitmask(
-                            networkBitmask);
+                    int bearerBitmask = convertNetworkTypeBitmaskToBearerBitmask(networkBitmask);
                     cv.put(BEARER_BITMASK, String.valueOf(bearerBitmask));
                 }
                 return;
@@ -1957,8 +2019,7 @@ public class TelephonyProvider extends ContentProvider
                 String fromCursor = c.getString(columnIndex);
                 if (!TextUtils.isEmpty(fromCursor) && fromCursor.matches("\\d+")) {
                     int bearerBitmask = Integer.valueOf(fromCursor);
-                    int networkBitmask = ServiceState.convertBearerBitmaskToNetworkTypeBitmask(
-                            bearerBitmask);
+                    int networkBitmask = convertBearerBitmaskToNetworkTypeBitmask(bearerBitmask);
                     cv.put(NETWORK_TYPE_BITMASK, String.valueOf(networkBitmask));
                 }
             }
@@ -2050,22 +2111,20 @@ public class TelephonyProvider extends ContentProvider
             int networkTypeBitmask = 0;
             String networkTypeList = parser.getAttributeValue(null, "network_type_bitmask");
             if (networkTypeList != null) {
-                networkTypeBitmask = ServiceState.getBitmaskFromString(networkTypeList);
+                networkTypeBitmask = getBitmaskFromString(networkTypeList);
             }
             map.put(NETWORK_TYPE_BITMASK, networkTypeBitmask);
 
             int bearerBitmask = 0;
             if (networkTypeList != null) {
-                bearerBitmask =
-                        ServiceState.convertNetworkTypeBitmaskToBearerBitmask(networkTypeBitmask);
+                bearerBitmask = convertNetworkTypeBitmaskToBearerBitmask(networkTypeBitmask);
             } else {
                 String bearerList = parser.getAttributeValue(null, "bearer_bitmask");
                 if (bearerList != null) {
-                    bearerBitmask = ServiceState.getBitmaskFromString(bearerList);
+                    bearerBitmask = getBitmaskFromString(bearerList);
                 }
                 // Update the network type bitmask to keep them sync.
-                networkTypeBitmask = ServiceState.convertBearerBitmaskToNetworkTypeBitmask(
-                        bearerBitmask);
+                networkTypeBitmask = convertBearerBitmaskToNetworkTypeBitmask(bearerBitmask);
                 // Legacy bearer is deprecated, in order to be compatible with bearer_bitmask till
                 // both are removed (bearer_bitmask is marked as deprecated now), just appends
                 // bearer into bearer_bitmask only.
@@ -2073,9 +2132,9 @@ public class TelephonyProvider extends ContentProvider
                 final String apnBearer = parser.getAttributeValue(null, BEARER);
                 if (apnBearer != null) {
                     final int legacyBearerBitmask =
-                            ServiceState.getBitmaskForTech(Integer.parseInt(apnBearer));
-                    networkTypeBitmask |= ServiceState
-                            .convertBearerBitmaskToNetworkTypeBitmask(legacyBearerBitmask);
+                            getBitmaskForTech(Integer.parseInt(apnBearer));
+                    networkTypeBitmask |=
+                            convertBearerBitmaskToNetworkTypeBitmask(legacyBearerBitmask);
                 }
                 map.put(NETWORK_TYPE_BITMASK, networkTypeBitmask);
             }
@@ -3085,13 +3144,6 @@ public class TelephonyProvider extends ContentProvider
         int mvnoDataIndex = ret.getColumnIndex(MVNO_MATCH_DATA);
         int carrierIdIndex = ret.getColumnIndex(CARRIER_ID);
 
-        IccRecords iccRecords = UiccController.getInstance().getIccRecords(
-                SubscriptionManager.getPhoneId(subId), UiccController.APP_FAM_3GPP);
-        if (iccRecords == null) {
-            loge("iccRecords is null");
-            return null;
-        }
-
         //Separate the result into MatrixCursor
         while (ret.moveToNext()) {
             List<String> data = new ArrayList<>();
@@ -3100,9 +3152,9 @@ public class TelephonyProvider extends ContentProvider
             }
 
             if (!TextUtils.isEmpty(ret.getString(numericIndex)) &&
-                    ApnSettingUtils.mvnoMatches(iccRecords,
-                            getMvnoTypeIntFromString(ret.getString(mvnoIndex)),
-                            ret.getString(mvnoDataIndex))) {
+                tm.isCurrentSimOperator(ret.getString(numericIndex),
+                    getMvnoTypeIntFromString(ret.getString(mvnoIndex)),
+                    ret.getString(mvnoDataIndex))) {
                 // 1. The APN that query based on legacy SIM MCC/MCC and MVNO
                 currentCursor.addRow(data);
             } else if (!TextUtils.isEmpty(ret.getString(numericIndex))
@@ -3841,7 +3893,20 @@ public class TelephonyProvider extends ContentProvider
                 return;
             }
         }
-        throw new SecurityException("No permission to write APN settings");
+
+        IPlatformCompat platformCompat = IPlatformCompat.Stub.asInterface(
+                ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
+        if (platformCompat != null) {
+            try {
+                platformCompat.reportChangeByUid(
+                        Telephony.Carriers.APN_READING_PERMISSION_CHANGE_ID,
+                        Binder.getCallingUid());
+            } catch (RemoteException e) {
+                //ignore
+            }
+        }
+
+        throw new SecurityException("No permission to access APN settings");
     }
 
     private DatabaseHelper mOpenHelper;
@@ -3887,10 +3952,6 @@ public class TelephonyProvider extends ContentProvider
     }
 
     private String getWhereClauseForRestoreDefaultApn(SQLiteDatabase db, int subId) {
-        IccRecords iccRecords = getIccRecords(subId);
-        if (iccRecords == null) {
-            return null;
-        }
         TelephonyManager telephonyManager =
             getContext().getSystemService(TelephonyManager.class).createForSubscriptionId(subId);
         String simOperator = telephonyManager.getSimOperator();
@@ -3904,8 +3965,8 @@ public class TelephonyProvider extends ContentProvider
                 String mvnoType = cursor.getString(0 /* MVNO_TYPE index */);
                 String mvnoMatchData = cursor.getString(1 /* MVNO_MATCH_DATA index */);
                 if (!TextUtils.isEmpty(mvnoType) && !TextUtils.isEmpty(mvnoMatchData)
-                        && ApnSettingUtils.mvnoMatches(iccRecords,
-                        getMvnoTypeIntFromString(mvnoType), mvnoMatchData)) {
+                        && telephonyManager.isCurrentSimOperator(simOperator,
+                            getMvnoTypeIntFromString(mvnoType), mvnoMatchData)) {
                     where = NUMERIC + "='" + simOperator + "'"
                             + " AND " + MVNO_TYPE + "='" + mvnoType + "'"
                             + " AND " + MVNO_MATCH_DATA + "='" + mvnoMatchData + "'"
@@ -3923,16 +3984,6 @@ public class TelephonyProvider extends ContentProvider
             }
         }
         return where;
-    }
-
-    @VisibleForTesting
-    IccRecords getIccRecords(int subId) {
-        TelephonyManager telephonyManager =
-            getContext().getSystemService(TelephonyManager.class).createForSubscriptionId(subId);
-        int family = telephonyManager.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM ?
-                UiccController.APP_FAM_3GPP : UiccController.APP_FAM_3GPP2;
-        return UiccController.getInstance().getIccRecords(
-                SubscriptionManager.getPhoneId(subId), family);
     }
 
     private synchronized void updateApnDb() {
@@ -4023,17 +4074,17 @@ public class TelephonyProvider extends ContentProvider
      */
     private static void syncBearerBitmaskAndNetworkTypeBitmask(ContentValues values) {
         if (values.containsKey(NETWORK_TYPE_BITMASK)) {
-            int convertedBitmask = ServiceState.convertNetworkTypeBitmaskToBearerBitmask(
+            int convertedBitmask = convertNetworkTypeBitmaskToBearerBitmask(
                     values.getAsInteger(NETWORK_TYPE_BITMASK));
             if (values.containsKey(BEARER_BITMASK)
                     && convertedBitmask != values.getAsInteger(BEARER_BITMASK)) {
                 loge("Network type bitmask and bearer bitmask are not compatible.");
             }
-            values.put(BEARER_BITMASK, ServiceState.convertNetworkTypeBitmaskToBearerBitmask(
+            values.put(BEARER_BITMASK, convertNetworkTypeBitmaskToBearerBitmask(
                     values.getAsInteger(NETWORK_TYPE_BITMASK)));
         } else {
             if (values.containsKey(BEARER_BITMASK)) {
-                int convertedBitmask = ServiceState.convertBearerBitmaskToNetworkTypeBitmask(
+                int convertedBitmask = convertBearerBitmaskToNetworkTypeBitmask(
                         values.getAsInteger(BEARER_BITMASK));
                 values.put(NETWORK_TYPE_BITMASK, convertedBitmask);
             }
@@ -4057,5 +4108,136 @@ public class TelephonyProvider extends ContentProvider
         String mvnoTypeString = TextUtils.isEmpty(mvnoType) ? mvnoType : mvnoType.toLowerCase();
         Integer mvnoTypeInt = MVNO_TYPE_STRING_MAP.get(mvnoTypeString);
         return  mvnoTypeInt == null ? UNSPECIFIED_INT : mvnoTypeInt;
+    }
+
+    private static int getBitmaskFromString(String bearerList) {
+        String[] bearers = bearerList.split("\\|");
+        int bearerBitmask = 0;
+        for (String bearer : bearers) {
+            int bearerInt = 0;
+            try {
+                bearerInt = Integer.parseInt(bearer.trim());
+            } catch (NumberFormatException nfe) {
+                return 0;
+            }
+
+            if (bearerInt == 0) {
+                return 0;
+            }
+            bearerBitmask |= getBitmaskForTech(bearerInt);
+        }
+        return bearerBitmask;
+    }
+
+    /**
+     * Transform RIL radio technology value to Network
+     * type bitmask{@link android.telephony.TelephonyManager.NetworkTypeBitMask}.
+     *
+     * @param rat The RIL radio technology.
+     * @return The network type
+     * bitmask{@link android.telephony.TelephonyManager.NetworkTypeBitMask}.
+     */
+    private static int rilRadioTechnologyToNetworkTypeBitmask(int rat) {
+        switch (rat) {
+            case RIL_RADIO_TECHNOLOGY_GPRS:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_GPRS;
+            case RIL_RADIO_TECHNOLOGY_EDGE:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_EDGE;
+            case RIL_RADIO_TECHNOLOGY_UMTS:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_UMTS;
+            case RIL_RADIO_TECHNOLOGY_HSDPA:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_HSDPA;
+            case RIL_RADIO_TECHNOLOGY_HSUPA:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_HSUPA;
+            case RIL_RADIO_TECHNOLOGY_HSPA:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_HSPA;
+            case RIL_RADIO_TECHNOLOGY_IS95A:
+            case RIL_RADIO_TECHNOLOGY_IS95B:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_CDMA;
+            case RIL_RADIO_TECHNOLOGY_1xRTT:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_1xRTT;
+            case RIL_RADIO_TECHNOLOGY_EVDO_0:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_EVDO_0;
+            case RIL_RADIO_TECHNOLOGY_EVDO_A:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_EVDO_A;
+            case RIL_RADIO_TECHNOLOGY_EVDO_B:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_EVDO_B;
+            case RIL_RADIO_TECHNOLOGY_EHRPD:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_EHRPD;
+            case RIL_RADIO_TECHNOLOGY_LTE:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_LTE;
+            case RIL_RADIO_TECHNOLOGY_HSPAP:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_HSPAP;
+            case RIL_RADIO_TECHNOLOGY_GSM:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_GSM;
+            case RIL_RADIO_TECHNOLOGY_TD_SCDMA:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_TD_SCDMA;
+            case RIL_RADIO_TECHNOLOGY_IWLAN:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_IWLAN;
+            case RIL_RADIO_TECHNOLOGY_LTE_CA:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_LTE_CA;
+            case RIL_RADIO_TECHNOLOGY_NR:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_NR;
+            default:
+                return (int) TelephonyManager.NETWORK_TYPE_BITMASK_UNKNOWN;
+        }
+    }
+
+    /**
+     * Convert network type bitmask to bearer bitmask.
+     *
+     * @param networkTypeBitmask The network type bitmask value
+     * @return The bearer bitmask value.
+     */
+    private static int convertNetworkTypeBitmaskToBearerBitmask(int networkTypeBitmask) {
+        if (networkTypeBitmask == 0) {
+            return 0;
+        }
+
+        int bearerBitmask = 0;
+        for (int bearerInt = 0; bearerInt < NEXT_RIL_RADIO_TECHNOLOGY; bearerInt++) {
+            if (bitmaskHasTarget(networkTypeBitmask,
+                    rilRadioTechnologyToNetworkTypeBitmask(bearerInt))) {
+                bearerBitmask |= getBitmaskForTech(bearerInt);
+            }
+        }
+        return bearerBitmask;
+    }
+
+    /**
+     * Convert bearer bitmask to network type bitmask.
+     *
+     * @param bearerBitmask The bearer bitmask value.
+     * @return The network type bitmask value.
+     */
+    private static int convertBearerBitmaskToNetworkTypeBitmask(int bearerBitmask) {
+        if (bearerBitmask == 0) {
+            return 0;
+        }
+
+        int networkTypeBitmask = 0;
+        for (int bearerUnitInt = 0; bearerUnitInt < NEXT_RIL_RADIO_TECHNOLOGY; bearerUnitInt++) {
+            int bearerUnitBitmask = getBitmaskForTech(bearerUnitInt);
+            if (bitmaskHasTarget(bearerBitmask, bearerUnitBitmask)) {
+                networkTypeBitmask |= rilRadioTechnologyToNetworkTypeBitmask(bearerUnitInt);
+            }
+        }
+        return networkTypeBitmask;
+    }
+
+    private static boolean bitmaskHasTarget(int bearerBitmask, int targetBitmask) {
+        if (bearerBitmask == 0) {
+            return true;
+        } else if (targetBitmask != 0) {
+            return ((bearerBitmask & targetBitmask) != 0);
+        }
+        return false;
+    }
+
+    private static int getBitmaskForTech(int radioTech) {
+        if (radioTech >= 1) {
+            return (1 << (radioTech - 1));
+        }
+        return 0;
     }
 }
