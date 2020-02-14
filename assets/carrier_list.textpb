@@ -6695,6 +6695,10 @@ carrier_id {
     mccmnc_tuple: "312530"
     gid1: "000002"
   }
+  carrier_attribute {
+    mccmnc_tuple: "310240"
+    gid1: "0000b0"
+  }
 }
 carrier_id {
   canonical_id: 1952
@@ -10503,6 +10507,42 @@ carrier_id {
   }
 }
 carrier_id {
+  canonical_id: 2457
+  carrier_name: "Nordic Telecom"
+  carrier_attribute {
+    mccmnc_tuple: "23004"
+    imsi_prefix_xpattern: "230040"
+  }
+}
+carrier_id {
+  canonical_id: 2458
+  carrier_name: "Yota Nicaragua"
+  carrier_attribute {
+    mccmnc_tuple: "71070"
+  }
+}
+carrier_id {
+  canonical_id: 2459
+  carrier_name: "GigSky"
+  carrier_attribute {
+    mccmnc_tuple: "312870"
+  }
+  carrier_attribute {
+    mccmnc_tuple: "310380"
+    imsi_prefix_xpattern: "3103805"
+    spn: "GigSky"
+    gid1: "6F"
+    gid1: "6E"
+  }
+  carrier_attribute {
+    mccmnc_tuple: "23801"
+    imsi_prefix_xpattern: "23801395"
+    spn: "GigSky"
+    gid1: "6F"
+    gid1: "6E"
+  }
+}
+carrier_id {
   canonical_id: 10000
   carrier_name: "Tracfone-ATT"
   carrier_attribute {
@@ -10702,4 +10742,4 @@ carrier_id {
   }
   parent_canonical_id: 1989
 }
-version: 33554454
+version: 33554457
