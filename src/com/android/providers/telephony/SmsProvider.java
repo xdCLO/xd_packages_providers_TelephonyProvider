@@ -21,7 +21,6 @@ import static android.telephony.SmsMessage.ENCODING_7BIT;
 import static android.telephony.SmsMessage.ENCODING_UNKNOWN;
 import static android.telephony.SmsMessage.MAX_USER_DATA_BYTES;
 import static android.telephony.SmsMessage.MAX_USER_DATA_SEPTETS;
-import static com.android.internal.telephony.SmsResponse.NO_ERROR_CODE;
 
 import android.annotation.NonNull;
 import android.app.AppOpsManager;
@@ -43,7 +42,6 @@ import android.provider.Contacts;
 import android.provider.Telephony;
 import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.Sms;
-import android.provider.Telephony.TextBasedSmsColumns;
 import android.provider.Telephony.Threads;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.SmsManager;
@@ -60,8 +58,8 @@ import java.io.UnsupportedEncodingException;
 import java.text.SimpleDateFormat;
 import com.android.internal.annotations.VisibleForTesting;
 
-import java.util.List;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 
 import com.android.internal.telephony.EncodeException;
@@ -73,6 +71,9 @@ import com.android.internal.telephony.cdma.sms.CdmaSmsAddress;
 import com.android.internal.telephony.cdma.sms.UserData;
 
 public class SmsProvider extends ContentProvider {
+    /* No response constant from SmsResponse */
+    static final int NO_ERROR_CODE = -1;
+
     private static final Uri NOTIFICATION_URI = Uri.parse("content://sms");
     private static final Uri ICC_URI = Uri.parse("content://sms/icc");
     private static final Uri ICC_SUBID_URI = Uri.parse("content://sms/icc_subId");
