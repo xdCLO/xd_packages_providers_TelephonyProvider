@@ -10,3 +10,8 @@ android_app {
     "android-support-v4"
     ],
 }
+
+filegroup {
+    name: "telephonyprovider-assets-carrierlist",
+    srcs: ["assets/carrier_list.*"],
+}
